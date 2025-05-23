@@ -18,19 +18,20 @@ The OSG Hosted CE Operator creates and manages HTCondor-CE deployments in Kubern
 
 ## Architecture
 
-```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│ ComputeEntrypoint│───▶│ CE Operator      │───▶│ Kubernetes      │
-│ (Custom Resource)│    │ (Controller)     │    │ Resources       │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                              │                          │
-                              ▼                          ▼
-                       ┌──────────────┐         ┌────────────────┐
-                       │ Health       │         │ • Deployment   │
-                       │ Monitoring   │         │ • Service      │
-                       │ & Pool       │         │ • ConfigMaps   │
-                       │ Management   │         │ • NetworkPolicy│
-                       └──────────────┘         └────────────────┘
+```mermaid
+graph LR
+    A["<b>ComputeEntrypoint</b><br>(Custom Resource)"] --> B["<b>CE Operator</b><br>(Controller)"]
+    B --> C["<b>Kubernetes</b><br>Resources"]
+
+    B --> D["Health<br>Monitoring<br>& Pool<br>Management"]
+    C --> E["• Deployment<br>• Service<br>• ConfigMaps<br>• NetworkPolicy"]
+
+    %% Styling for clarity (optional, but helpful)
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style B fill:#ccf,stroke:#333,stroke-width:2px
+    style C fill:#9cf,stroke:#333,stroke-width:2px
+    style D fill:#lightgrey,stroke:#333,stroke-width:1px
+    style E fill:#lightgrey,stroke:#333,stroke-width:1px
 ```
 ## ComputeEntrypoint Resource Specification
 
