@@ -1,0 +1,8 @@
+---
+# kubernetes/rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: osg-hosted-ce-controller
+  namespace: osg-ce-dev
+---

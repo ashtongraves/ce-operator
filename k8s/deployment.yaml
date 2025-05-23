@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: osg-hosted-ce-controller
+  namespace: osg-ce-dev
+  labels:
+    app: osg-hosted-ce-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: osg-hosted-ce-controller
+  template:
+    metadata:
+      labels:
+        app: osg-hosted-ce-controller
+    spec:
+      serviceAccountName: osg-hosted-ce-controller
+      containers:
+      - name: controller
+        image: hub.opensciencegrid.org/ashtongraves/ce-controller:latest
+        imagePullPolicy: Always
+        env:
+        - name: MIN_HEALTHY_PERCENTAGE
+          value: "0.8"
+        - name: LOG_LEVEL
+          value: "INFO"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
