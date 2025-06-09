@@ -13,11 +13,11 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the controller code
-COPY osg-hosted-ce-controller.py .
+COPY controller.py .
 
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash controller
 USER controller
 
 # Run the controller
-CMD ["kopf", "run", "/app/osg-hosted-ce-controller.py", "--verbose"]
+CMD ["kopf", "run", "/app/controller.py", "--verbose"]

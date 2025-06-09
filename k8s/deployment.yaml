@@ -3,8 +3,6 @@ kind: Deployment
 metadata:
   name: osg-hosted-ce-controller
   namespace: osg-ce-dev
-  labels:
-    app: osg-hosted-ce-controller
 spec:
   replicas: 1
   selector:

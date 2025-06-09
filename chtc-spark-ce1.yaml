@@ -32,6 +32,8 @@ spec:
   kubernetes:
     image: hub.opensciencegrid.org/osg-htc/hosted-ce:24-release
     hostname: chtc-spark-ce1.svc.opensciencegrid.org
+    sleep: false
+    replicas: 1
     node:
       hostname: null
       labels:
@@ -39,6 +41,11 @@ spec:
     service:
       annotations:
         metallb.universe.tf/address-pool: tiger-vlan5
+  users:
+  - user: osg01
+    scitoken: https://scitokens.org/osg-connect
+  - user: osg04
+    scitoken: https://cms-auth.web.cern.ch/,bad55f4e-602c-4e8d-a5c5-bd8ffb762113
   cluster:
     host: spark-login.chtc.wisc.edu
     batch: slurm
@@ -51,6 +58,7 @@ spec:
       knownHosts: null
   bosco:
     dir: $HOME/bosco-osg-wn-client
+    tarball: null
     overrides:
     - name: null
       path: null
@@ -67,6 +75,9 @@ spec:
       gpu: 0
     vo:
     - osg
+    wholeNode: false
+    apptainer: false
+    os: rhel8
   - name: preempt
     queue: ospool_pre
     limit: 40
@@ -77,6 +88,9 @@ spec:
       gpu: 0
     vo:
     - osg
+    wholeNode: false
+    apptainer: false
+    os: rhel8
   - name: gpu
     queue: gpu
     limit: 4
@@ -87,5 +101,8 @@ spec:
       gpu: 1
     vo:
     - osg
+    wholeNode: false
+    apptainer: false
+    os: rhel8
   config: |+
     # CE Specific HTCondor config goes here

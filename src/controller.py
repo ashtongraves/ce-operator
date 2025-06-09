@@ -1,8 +1,7 @@
 import kopf
 import logging
 import asyncio
-import yaml
-from typing import Dict, List, Optional, Set
+from typing import Dict
 from datetime import datetime, timezone
 
 from kubernetes import client, config
@@ -352,6 +351,12 @@ async def ensure_deployment(name: str, namespace: str, spec: Dict, meta: Dict, l
         client.V1EnvVar(name="LE_STAGING", value="false"),
     ]
     
+    # Add BOSCO_TARBALL_URL if specified
+    bosco_config = spec.get('bosco', {})
+    tarball_url = bosco_config.get('tarball')
+    if tarball_url:
+        env_vars.append(client.V1EnvVar(name="BOSCO_TARBALL_URL", value=tarball_url))
+    
     # Build volume mounts
     volume_mounts = [
         client.V1VolumeMount(
@@ -416,20 +421,27 @@ async def ensure_deployment(name: str, namespace: str, spec: Dict, meta: Dict, l
         )
     
     # Build container
-    container = client.V1Container(
-        name="osg-hosted-ce",
-        image=k8s_config.get('image', 'hub.opensciencegrid.org/osg-htc/hosted-ce:24-release'),
-        image_pull_policy="Always",
-        ports=[
+    container_args = {
+        "name": "osg-hosted-ce",
+        "image": k8s_config.get('image', 'hub.opensciencegrid.org/osg-htc/hosted-ce:24-release'),
+        "image_pull_policy": "Always",
+        "ports": [
             client.V1ContainerPort(container_port=9619, name="htcondor-ce", protocol="TCP")
         ],
-        env=env_vars,
-        volume_mounts=volume_mounts,
-        resources=client.V1ResourceRequirements(
+        "env": env_vars,
+        "volume_mounts": volume_mounts,
+        "resources": client.V1ResourceRequirements(
             requests={"cpu": "500m", "memory": "1Gi"},
             limits={"cpu": "2", "memory": "4Gi"}
         )
-    )
+    }
+    
+    # Override command for debugging if sleep is enabled
+    if k8s_config.get('sleep', False):
+        container_args["command"] = ["/bin/sleep"]
+        container_args["args"] = ["infinity"]
+    
+    container = client.V1Container(**container_args)
     
     # Build deployment
     deployment = client.V1Deployment(
@@ -440,7 +452,7 @@ async def ensure_deployment(name: str, namespace: str, spec: Dict, meta: Dict, l
             owner_references=[create_owner_reference(meta)]
         ),
         spec=client.V1DeploymentSpec(
-            replicas=1,
+            replicas=k8s_config.get('replicas', 1),
             selector=client.V1LabelSelector(
                 match_labels={"compute-entrypoint": name}
             ),
@@ -487,12 +499,20 @@ def build_osg_configure_config(spec: Dict, meta: Dict) -> str:
     latitude = annotations.get('topology/site-latitude', '0.00')
     longitude = annotations.get('topology/site-longitude', '0.00')
     
+    # Determine if this is production or ITB based on topology annotation
+    is_production = annotations.get('topology/production', 'false').lower() == 'true'
+    group = "OSG" if is_production else "OSG-ITB"
+    
+    # Get GRACC site for accounting
+    gracc_site = annotations.get('gracc/site', resource_name)
+    
     config_lines = [
         "[Gateway]",
+        "htcondor_gateway_enabled = True",
         "job_envvar_path=$PATH",
         "",
         "[Site Information]",
-        f"group = OSG",
+        f"group = {group}",
         f"host_name = localhost",
         f"resource = {resource_name}",
         f"resource_group = {resource_group}",
@@ -511,6 +531,19 @@ def build_osg_configure_config(spec: Dict, meta: Dict) -> str:
         "[Storage]",
         f"grid_dir = {cluster_config.get('scratch', '/tmp')}",
         f"worker_node_temp = {cluster_config.get('scratch', '/tmp')}",
+        f"app_dir = {cluster_config.get('scratch', '/tmp')}",
+        f"data_dir = {cluster_config.get('scratch', '/tmp')}",
+        f"site_read = {cluster_config.get('scratch', '/tmp')}",
+        f"site_write = {cluster_config.get('scratch', '/tmp')}",
+        "",
+        "[Gratia]",
+        "enabled = True",
+        f"resource = {gracc_site}",
+        "probes = jobmanager:condor",
+        "",
+        "[Info Services]",
+        "enabled = True",
+        "ce_collectors = collector1.opensciencegrid.org:9619,collector2.opensciencegrid.org:9619",
         "",
         f"[Subcluster {resource_name}]",
         f"name = {resource_name}",
@@ -523,6 +556,39 @@ def build_osg_configure_config(spec: Dict, meta: Dict) -> str:
         f"enabled = {'True' if cluster_config.get('squid') else 'False'}",
         f"location = {cluster_config.get('squid', '')}",
     ]
+    
+    # Add pilot-specific configuration sections
+    pilot_configs = spec.get('pilot', [])
+    for pilot in pilot_configs:
+        pilot_name = pilot.get('name', 'default')
+        queue = pilot.get('queue', 'default')
+        max_pilots = pilot.get('limit', 2)
+        walltime = pilot.get('walltime', 1440)
+        resources = pilot.get('resources', {})
+        vos = pilot.get('vo', [])
+        whole_node = pilot.get('wholeNode', False)
+        apptainer = pilot.get('apptainer', False)
+        
+        # Get OS field - required when require_singularity is False
+        pilot_os = pilot.get('os', 'rhel8')  # Default to rhel8
+        
+        config_lines.extend([
+            "",
+            f"[Pilot {pilot_name}]",
+            f"allowed_vos = {','.join(vos) if vos else '*'}",
+            f"queue = {queue}",
+            f"cpucount = {resources.get('cpu', 1)}",
+            f"ram_mb = {resources.get('ram', 2500)}",  # Default to 2500 per OSG docs
+            f"max_wall_time = {walltime}",
+            f"max_pilots = {max_pilots}",
+            f"whole_node = {str(whole_node).lower()}",
+            f"gpucount = {resources.get('gpu', 0)}",
+            f"require_singularity = {str(apptainer).lower()}"
+        ])
+        
+        # Add OS field only if require_singularity is False
+        if not apptainer:
+            config_lines.append(f"os = {pilot_os}")
     
     return "\n".join(config_lines)
 
@@ -557,29 +623,6 @@ def build_htcondor_ce_config(spec: Dict, meta: Dict) -> str:
         ""
     ])
     
-    # Add pilot-specific configuration
-    for i, pilot in enumerate(pilot_configs):
-        pilot_name = pilot.get('name', f'pilot_{i}')
-        queue = pilot.get('queue', 'default')
-        limit = pilot.get('limit', 10)
-        walltime = pilot.get('walltime', 4320)
-        resources = pilot.get('resources', {})
-        
-        config_lines.extend([
-            f"# Pilot configuration: {pilot_name}",
-            f"JOB_ROUTER_ENTRIES = $(JOB_ROUTER_ENTRIES) \\",
-            f"  [ \\",
-            f"    Name = \"{pilot_name}\"; \\", 
-            f"    Requirements = (TARGET.queue =?= \"{queue}\"); \\",
-            f"    MaxJobs = {limit}; \\",
-            f"    MaxWallTime = {walltime}; \\",
-            f"    GridResource = \"batch {cluster_config.get('batch', 'slurm')} $(Owner)@{cluster_config.get('host', 'localhost')} --rgahp-glite ~/{bosco_config.get('dir', 'bosco')}/glite\"; \\",
-            f"    set_remote_queue = \"{queue}\"; \\",
-            f"    set_remote_cpus = {resources.get('cpu', 1)}; \\",
-            f"    set_remote_memory = {resources.get('ram', 1024)}; \\",
-            f"  ]",
-            ""
-        ])
     
     # Add GridResource transform
     config_lines.extend([
@@ -590,6 +633,35 @@ def build_htcondor_ce_config(spec: Dict, meta: Dict) -> str:
         "JOB_ROUTER_PRE_ROUTE_TRANSFORM_NAMES = $(JOB_ROUTER_PRE_ROUTE_TRANSFORM_NAMES) GridResource",
         ""
     ])
+    
+    # Add ID token generation for glidein -> CE collector advertising (from users section)
+    users = spec.get('users', [])
+    idtoken_names = []
+    for user_config in users:
+        username = user_config.get('user')
+        if username:
+            # Create safe name for HTCondor config (replace non-alphanumeric with underscore)
+            safe_name = ''.join(c if c.isalnum() else '_' for c in username)
+            idtoken_names.append(safe_name)
+            
+            config_lines.extend([
+                f"JOB_ROUTER_CREATE_IDTOKEN_{safe_name} @=end",
+                f"  sub = \"{username}@users.htcondor.org\"",
+                f"  kid = \"POOL\"",
+                f"  lifetime = 604800",
+                f"  scope = \"ADVERTISE_STARTD, ADVERTISE_MASTER, READ\"",
+                f"  dir = \"/usr/share/condor-ce/glidein-tokens/{username}\"",
+                f"  filename = \"ce_{username}.idtoken\"",
+                f"  owner = \"{username}\"",
+                "@end",
+                ""
+            ])
+    
+    if idtoken_names:
+        config_lines.extend([
+            f"JOB_ROUTER_CREATE_IDTOKEN_NAMES = $(JOB_ROUTER_CREATE_IDTOKEN_NAMES) {' '.join(idtoken_names)}",
+            ""
+        ])
     
     # Add custom configuration
     if custom_config:
@@ -604,16 +676,19 @@ def build_scitokens_config(spec: Dict) -> str:
     """Build SciTokens configuration"""
     config_lines = []
     
-    # Add VO mappings based on pilot configurations
-    pilots = spec.get('pilot', [])
-    for pilot in pilots:
-        vos = pilot.get('vo', [])
-        for vo in vos:
-            if vo == 'osg':
-                config_lines.append("SCITOKENS /^https:\\/\\/scitokens\\.org\\/osg-connect/ osg01")
-            elif vo == 'cms':
-                config_lines.append("SCITOKENS /^https:\\/\\/cms-auth\\.web\\.cern\\.ch\\// osg04")
-            # Add more VO mappings as needed
+    # Add user mappings based on users section
+    users = spec.get('users', [])
+    for user_config in users:
+        username = user_config.get('user')
+        scitoken = user_config.get('scitoken')
+        
+        if username and scitoken:
+            # Escape special regex characters for URL matching (following helm template pattern)
+            escaped_token = scitoken.replace('/', '\\/').replace('.', '\\.').replace('-', '\\-')
+            # Add comma if not already present (following helm template logic)
+            if ',' not in scitoken:
+                escaped_token += ','
+            config_lines.append(f"SCITOKENS /^{escaped_token}/ {username}")
     
     return "\n".join(config_lines) if config_lines else "# No SciTokens mappings configured"
 

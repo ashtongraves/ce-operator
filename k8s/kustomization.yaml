@@ -1,11 +1,12 @@
 ---
-# kubernetes/kustomization.yaml
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: osg-ce-dev
 
 resources:
 - rbac.yaml
 - deployment.yaml
+- crd.yaml
 
 images:
 - name: hub.opensciencegrid.org/ashtongraves/ce-controller

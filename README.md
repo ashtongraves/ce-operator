@@ -12,9 +12,12 @@ The OSG Hosted CE Operator creates and manages HTCondor-CE deployments in Kubern
 - **Health Monitoring**: Continuous health checks with pool-aware safety mechanisms
 - **Multi-Pool Support**: Track and manage resources across different OSG pools (ospool, cms, atlas, etc.)
 - **Automated Configuration**: Generate HTCondor-CE, OSG-Configure, and SciTokens configurations
+- **Full OSG-Configure Compliance**: Complete implementation of all OSG-Configure sections and fields
+- **SciToken Integration**: User-based token mapping for VO access control
 - **Network Security**: Automatic NetworkPolicy creation for secure communication
 - **Load Balancing**: Service exposure with MetalLB integration
-- **BOSCO Integration**: Support for SSH-based job submission to remote clusters
+- **BOSCO Integration**: Support for SSH-based job submission to remote clusters with custom tarball URLs
+- **Production/ITB Support**: Automatic configuration based on topology annotations
 
 ## Architecture
 
@@ -45,17 +48,35 @@ metadata:
   namespace: osg-ce-dev
   annotation:
     topology/facility: MyFacility
+    topology/resource-group: MyFacility-Resources
     topology/resource: MyResource-CE
+    topology/contact: Site Administrator
     topology/contact-email: admin@example.org
+    topology/site-city: Madison
+    topology/site-country: US
+    topology/site-latitude: 43.0711999
+    topology/site-longitude: -89.4065713
+    topology/production: true
+    gracc/site: MyFacility
   labels:
     pool/ospool: true
 spec:
   kubernetes:
     image: hub.opensciencegrid.org/osg-htc/hosted-ce:24-release
     hostname: my-ce.example.org
+    replicas: 1
+  users:
+  - user: osg01
+    scitoken: https://scitokens.org/osg-connect
+  - user: osg04
+    scitoken: https://cms-auth.web.cern.ch/,bad55f4e-602c-4e8d-a5c5-bd8ffb762113
   cluster:
     host: login.example.org
     batch: slurm
+    scratch: /var/lib/condor/execute/osg01
+  bosco:
+    dir: $HOME/bosco-osg-wn-client
+    tarball: null  # Optional custom bosco tarball URL
   pilot:
   - name: standard
     queue: normal
@@ -64,17 +85,42 @@ spec:
     resources:
       cpu: 8
       ram: 16384
+      gpu: 0
     vo:
     - osg
+    wholeNode: false
+    apptainer: false
+    os: rhel8
 ```
 
 ### Configuration Sections
 
+#### Metadata Annotations
+Required topology and configuration annotations:
+- `topology/facility`: Facility name
+- `topology/resource-group`: Resource group name  
+- `topology/resource`: Resource name
+- `topology/contact`: Site contact name
+- `topology/contact-email`: Site contact email
+- `topology/site-city`: Site geographic city
+- `topology/site-country`: Site country code
+- `topology/site-latitude`: Site latitude coordinates
+- `topology/site-longitude`: Site longitude coordinates
+- `topology/production`: Production vs ITB environment (true/false)
+- `gracc/site`: GRACC accounting site name
+
 #### Kubernetes Configuration (`spec.kubernetes`)
 - `image`: Container image for the HTCondor-CE
 - `hostname`: External hostname for the CE
+- `replicas`: Number of CE replicas (default: 1)
+- `sleep`: Override container command to sleep infinity for debugging (default: false)
 - `node.labels`: Node selector for pod placement
 - `service.annotations`: Service annotations (e.g., MetalLB pool)
+
+#### User Configuration (`spec.users`)
+Array of SciToken to user mappings:
+- `user`: Local username (e.g., osg01, osg04)
+- `scitoken`: SciToken issuer URL(s), comma-separated for multiple tokens
 
 #### Cluster Configuration (`spec.cluster`)
 - `host`: Remote cluster login node
@@ -83,14 +129,25 @@ spec:
 - `scratch`: Scratch directory path
 - `ssh`: SSH configuration for BOSCO
 
+#### BOSCO Configuration (`spec.bosco`)
+- `dir`: Remote BOSCO installation directory
+- `tarball`: Custom BOSCO tarball URL (optional)
+- `overrides`: BOSCO configuration overrides
+
 #### Pilot Configuration (`spec.pilot`)
-Array of pilot job configurations:
+Array of pilot job configurations (OSG-Configure compliant):
 - `name`: Pilot configuration name
-- `queue`: Target batch queue
-- `limit`: Maximum concurrent jobs
-- `walltime`: Maximum wall time (minutes)
-- `resources`: Resource requirements (cpu, ram, gpu)
+- `queue`: Target batch queue  
+- `limit`: Maximum concurrent pilots (`max_pilots` in OSG-Configure)
+- `walltime`: Maximum wall time in minutes (default: 1440)
+- `resources`: Resource requirements
+  - `cpu`: CPU core count (default: 1)
+  - `ram`: Memory in MB (default: 2500)
+  - `gpu`: GPU count (default: 0)
 - `vo`: Supported Virtual Organizations
+- `wholeNode`: Whether pilots can use entire nodes (default: false)
+- `apptainer`: Require Singularity/Apptainer support (default: false)
+- `os`: Operating system when apptainer=false (rhel6, rhel7, rhel8, ubuntu18)
 
 #### Pool Labels
 Use labels to assign CEs to specific OSG pools:
@@ -120,6 +177,62 @@ The operator implements sophisticated health monitoring to ensure pool stability
 - **Unhealthy**: No available replicas
 - **Unknown**: Health check failed
 - **Missing**: Resource not found
+
+## OSG-Configure Compliance
+
+The operator generates fully compliant OSG-Configure configuration files following the [official OSG-Configure specification](https://github.com/opensciencegrid/osg-configure). All configuration sections are automatically generated:
+
+### Generated Configuration Sections
+
+#### Gateway Section
+- `htcondor_gateway_enabled = True`
+- `job_envvar_path=$PATH`
+
+#### Site Information Section  
+- Automatic OSG vs OSG-ITB group assignment based on `topology/production` annotation
+- Complete topology information from metadata annotations
+- Batch system configuration
+
+#### Storage Section
+- `grid_dir`, `worker_node_temp`: Scratch space configuration
+- `app_dir`, `data_dir`: Application and data directories  
+- `site_read`, `site_write`: Data staging locations
+
+#### Gratia Accounting Section
+- `enabled = True` for job accounting
+- `resource`: Uses `gracc/site` annotation
+- `probes = jobmanager:condor`
+
+#### Info Services Section
+- `enabled = True` for central collector reporting
+- `ce_collectors`: OSG central collectors
+
+#### Subcluster Section
+- Resource specifications and VO access control
+- Automatically named after topology resource
+
+#### Pilot Sections
+- Generated from `spec.pilot` configurations
+- All OSG-Configure pilot fields supported
+- Proper defaults per OSG specification
+
+#### BOSCO Section
+- `enabled = False` (appropriate for hosted CEs)
+
+#### Squid Section  
+- Conditional configuration based on cluster squid setting
+
+### SciToken Configuration
+
+The operator generates SciToken mappings from the `spec.users` section:
+- Maps SciToken issuer URLs to local usernames
+- Supports multiple tokens per user (comma-separated)
+- Generates HTCondor ID tokens for glidein advertising
+- Proper regex escaping for URL matching
+
+### HTCondor-CE Configuration
+
+Custom HTCondor-CE configuration can be added via `spec.config` for site-specific requirements not covered by the default generated configuration.
 
 ## Advanced Configuration
 
@@ -161,7 +274,7 @@ spec:
     MAX_JOBS_PER_OWNER = 100
 ```
 
-### BOSCO Overrides
+### BOSCO Configuration
 
 Configure BOSCO-specific settings:
 
@@ -169,10 +282,13 @@ Configure BOSCO-specific settings:
 spec:
   bosco:
     dir: $HOME/bosco-osg-wn-client
+    tarball: https://example.com/custom-bosco.tar.gz  # Optional custom tarball
     overrides:
     - name: gridmanager.log.debug
       path: /path/to/custom/config
 ```
+
+The `tarball` field allows specifying a custom BOSCO tarball URL for installation on the remote login host instead of using the default determined by the Hosted CE.
 
 ## Monitoring and Troubleshooting
 
