@@ -2,8 +2,8 @@ apiVersion: osg-htc.org/v1
 kind: ComputeEntrypoint
 metadata:
   name: chtc-spark-ce1
-  namespace: osg-ce-dev
-  annotation:
+  namespace: default
+  annotations:
     topology/facility: CHTC
     topology/resource-group: CHTC-Spark 
     topology/resource: CHTC-Spark-CE1
@@ -12,35 +12,47 @@ metadata:
     topology/contact-email: jdost@ucsd.edu
     topology/site-city: Madison
     topology/site-country: US
-    topology/site-latitude: 43.0711999
-    topology/site-longitude: -89.4065713
-    topology/production: true
+    topology/site-latitude: "43.0711999"
+    topology/site-longitude: "-89.4065713"
+    topology/production: "true"
     factory/entry-name: OSG_US_CHTC-Spark-CE1
     factory/glidein-site: CHTC-Spark
     factory/glidein-resource: CHTC-Spark-CE1
     gracc/site: CHTC
   labels:
-    pool/ospool: true
-    pool/igwn: false
-    pool/atlas: false
-    pool/dune: false
-    pool/icecube: false
-    pool/jlab: false
-    pool/cms: false
-    pool/gluex: false
+    pool/ospool: "true"
+    pool/igwn: "false"
+    pool/atlas: "false"
+    pool/dune: "false"
+    pool/icecube: "false"
+    pool/jlab: "false"
+    pool/cms: "false"
+    pool/gluex: "false"
 spec:
   kubernetes:
     image: hub.opensciencegrid.org/osg-htc/hosted-ce:24-release
     hostname: chtc-spark-ce1.svc.opensciencegrid.org
     sleep: false
     replicas: 1
-    node:
-      hostname: null
-      labels:
-        datacenter: wid-vlan5
-    service:
-      annotations:
-        metallb.universe.tf/address-pool: tiger-vlan5
+    # node:
+    #   hostname: null
+    #   labels:
+    #     datacenter: wid-vlan5
+    # service:
+    #   annotations:
+    #     metallb.universe.tf/address-pool: tiger-vlan5
+    storage:
+      lib:
+        size: 5Gi
+        class: 3x-replica-block
+      log:
+        size: 5Gi
+        class: 3x-replica-block
+      key:
+        size: 5Gi
+        class: 3x-replica-block
+    certificate:
+      issuerRef: letsencrypt-prod-newchain
   users:
   - user: osg01
     scitoken: https://scitokens.org/osg-connect

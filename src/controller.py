@@ -210,13 +210,16 @@ async def ensure_ce_resources(name: str, namespace: str, spec: Dict, meta: Dict,
     # 2. Create PVCs
     await ensure_pvcs(name, namespace, spec, meta, logger)
     
-    # 3. Create Service
+    # 3. Create Certificate
+    await ensure_certificate(name, namespace, spec, meta, logger)
+    
+    # 4. Create Service
     await ensure_service(name, namespace, spec, meta, logger)
     
-    # 4. Create NetworkPolicy
+    # 5. Create NetworkPolicy
     await ensure_network_policy(name, namespace, meta, logger)
     
-    # 5. Create Deployment
+    # 6. Create Deployment
     await ensure_deployment(name, namespace, spec, meta, logger)
 
 async def ensure_configmaps(name: str, namespace: str, spec: Dict, meta: Dict, logger):
@@ -301,6 +304,80 @@ async def ensure_pvcs(name: str, namespace: str, spec: Dict, meta: Dict, logger)
                 logger.info(f"PVC osg-hosted-ce-{name}-{storage_name} already exists")
             else:
                 raise
+
+async def ensure_certificate(name: str, namespace: str, spec: Dict, meta: Dict, logger):
+    """Create Certificate for the ComputeEntrypoint"""
+    certificate_config = spec.get('certificate', {})
+    k8s_config = spec.get('kubernetes', {})
+    
+    # Skip certificate creation if not configured
+    if not certificate_config:
+        logger.info(f"No certificate configuration found for {name}")
+        return
+    
+    issuer_ref = certificate_config.get('issuerRef')
+    if not issuer_ref:
+        logger.warning(f"Certificate configuration missing issuerRef for {name}")
+        return
+    
+    hostname = k8s_config.get('hostname', f"{name}.svc.opensciencegrid.org")
+    
+    # Create Certificate resource using dynamic client for CRDs
+    certificate_body = {
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "metadata": {
+            "name": f"{name}-cert",
+            "namespace": namespace,
+            "labels": {"compute-entrypoint": name, "app": "osg-hosted-ce"},
+            "ownerReferences": [create_owner_reference_dict(meta)]
+        },
+        "spec": {
+            "secretName": f"{name}-cert",
+            "commonName": hostname,
+            "dnsNames": [hostname],
+            "usages": ["server auth", "client auth"],
+            "issuerRef": {
+                "name": issuer_ref,
+                "kind": "ClusterIssuer"
+            }
+        }
+    }
+    
+    try:
+        # Use dynamic client to create cert-manager Certificate
+        from kubernetes import dynamic
+        from kubernetes.client import api_client
+        
+        dyn_client = dynamic.DynamicClient(api_client.ApiClient())
+        cert_api = dyn_client.resources.get(api_version="cert-manager.io/v1", kind="Certificate")
+        
+        try:
+            cert_api.create(namespace=namespace, body=certificate_body)
+            logger.info(f"Created Certificate {name}-cert")
+        except Exception as e:
+            if "already exists" in str(e):
+                cert_api.patch(namespace=namespace, name=f"{name}-cert", body=certificate_body)
+                logger.info(f"Updated Certificate {name}-cert")
+            else:
+                raise
+                
+    except ImportError:
+        logger.warning("cert-manager not available, skipping certificate creation")
+    except Exception as e:
+        logger.error(f"Failed to create certificate for {name}: {e}")
+        raise
+
+def create_owner_reference_dict(meta: Dict) -> Dict:
+    """Create owner reference dictionary for cert-manager resources"""
+    return {
+        "apiVersion": "osg-htc.org/v1",
+        "kind": "ComputeEntrypoint",
+        "name": meta['name'],
+        "uid": meta['uid'],
+        "controller": True,
+        "blockOwnerDeletion": True
+    }
 
 async def ensure_service(name: str, namespace: str, spec: Dict, meta: Dict, logger):
     """Create Service for the ComputeEntrypoint"""
@@ -474,6 +551,28 @@ async def ensure_deployment(name: str, namespace: str, spec: Dict, meta: Dict, l
             )
         )
     
+    # Add certificate volume if configured
+    certificate_config = spec.get('certificate', {})
+    if certificate_config:
+        volumes.append(
+            client.V1Volume(
+                name="host-cert-key",
+                secret=client.V1SecretVolumeSource(
+                    secret_name=f"{name}-cert",
+                    items=[
+                        client.V1KeyToPath(key="tls.crt", path="hostcert.pem", mode=0o644),
+                        client.V1KeyToPath(key="tls.key", path="hostkey.pem", mode=0o400)
+                    ]
+                )
+            )
+        )
+        volume_mounts.append(
+            client.V1VolumeMount(
+                name="host-cert-key",
+                mount_path="/etc/grid-security-orig.d"
+            )
+        )
+
     # Add SSH key volume if specified
     ssh_key_secret = cluster_config.get('ssh', {}).get('key')
     if ssh_key_secret:
