@@ -207,13 +207,16 @@ async def ensure_ce_resources(name: str, namespace: str, spec: Dict, meta: Dict,
     # 1. Create ConfigMaps
     await ensure_configmaps(name, namespace, spec, meta, logger)
     
-    # 2. Create Service
+    # 2. Create PVCs
+    await ensure_pvcs(name, namespace, spec, meta, logger)
+    
+    # 3. Create Service
     await ensure_service(name, namespace, spec, meta, logger)
     
-    # 3. Create NetworkPolicy
+    # 4. Create NetworkPolicy
     await ensure_network_policy(name, namespace, meta, logger)
     
-    # 4. Create Deployment
+    # 5. Create Deployment
     await ensure_deployment(name, namespace, spec, meta, logger)
 
 async def ensure_configmaps(name: str, namespace: str, spec: Dict, meta: Dict, logger):
@@ -255,6 +258,49 @@ async def ensure_configmaps(name: str, namespace: str, spec: Dict, meta: Dict, l
         )
         
         await create_or_update_configmap(configmap, namespace, logger)
+
+async def ensure_pvcs(name: str, namespace: str, spec: Dict, meta: Dict, logger):
+    """Create PVCs for the ComputeEntrypoint"""
+    k8s_config = spec.get('kubernetes', {})
+    storage_config = k8s_config.get('storage', {})
+    
+    # Create PVCs for each storage configuration
+    for storage_name, storage_spec in storage_config.items():
+        size = storage_spec.get('size', '5Gi')
+        storage_class = storage_spec.get('class')
+        access_modes = storage_spec.get('accessModes', ['ReadWriteOnce'])
+        
+        # Build PVC spec
+        pvc_spec = client.V1PersistentVolumeClaimSpec(
+            access_modes=access_modes,
+            resources=client.V1ResourceRequirements(
+                requests={'storage': size}
+            )
+        )
+        
+        if storage_class:
+            pvc_spec.storage_class_name = storage_class
+        
+        # Create PVC with finalizer to prevent deletion
+        pvc = client.V1PersistentVolumeClaim(
+            metadata=client.V1ObjectMeta(
+                name=f"osg-hosted-ce-{name}-{storage_name}",
+                namespace=namespace,
+                labels={"compute-entrypoint": name, "app": "osg-hosted-ce", "storage": storage_name},
+                finalizers=["kubernetes.io/pvc-protection"],
+                owner_references=[create_owner_reference(meta)]
+            ),
+            spec=pvc_spec
+        )
+        
+        try:
+            core_v1.create_namespaced_persistent_volume_claim(namespace=namespace, body=pvc)
+            logger.info(f"Created PVC osg-hosted-ce-{name}-{storage_name}")
+        except ApiException as e:
+            if e.status == 409:
+                logger.info(f"PVC osg-hosted-ce-{name}-{storage_name} already exists")
+            else:
+                raise
 
 async def ensure_service(name: str, namespace: str, spec: Dict, meta: Dict, logger):
     """Create Service for the ComputeEntrypoint"""
@@ -376,6 +422,25 @@ async def ensure_deployment(name: str, namespace: str, spec: Dict, meta: Dict, l
         )
     ]
     
+    # Add storage volume mounts based on osg-hosted-ce reference
+    storage_config = k8s_config.get('storage', {})
+    storage_mount_paths = {
+        'lib': '/var/lib/condor-ce',
+        'log': '/var/log/condor-ce', 
+        'key': '/etc/condor-ce/passwords.d/'
+    }
+    
+    for storage_name in storage_config.keys():
+        if storage_name not in storage_mount_paths:
+            raise ValueError(f"Unknown storage type '{storage_name}'. Supported types: {list(storage_mount_paths.keys())}")
+        
+        volume_mounts.append(
+            client.V1VolumeMount(
+                name=f"storage-{storage_name}",
+                mount_path=storage_mount_paths[storage_name]
+            )
+        )
+    
     # Build volumes
     volumes = [
         client.V1Volume(
@@ -397,6 +462,17 @@ async def ensure_deployment(name: str, namespace: str, spec: Dict, meta: Dict, l
             )
         )
     ]
+    
+    # Add storage volumes
+    for storage_name in storage_config.keys():
+        volumes.append(
+            client.V1Volume(
+                name=f"storage-{storage_name}",
+                persistent_volume_claim=client.V1PersistentVolumeClaimVolumeSource(
+                    claim_name=f"osg-hosted-ce-{name}-{storage_name}"
+                )
+            )
+        )
     
     # Add SSH key volume if specified
     ssh_key_secret = cluster_config.get('ssh', {}).get('key')
